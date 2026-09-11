@@ -1,0 +1,54 @@
+# Ares security assessment, as a reusable Azure DevOps step template.
+#
+# The customer's own azure-pipelines.yml extends this; everything else (modules, credentials,
+# agent, recipients, the quality gate) lives on the pipeline profile in Ares.
+#
+#   steps:
+#     - template: ares-scan.yml@ares
+#       parameters:
+#         profile: '9f3c8a12-....'
+#         previewUrl: '$(previewUrl)'    # optional
+#
+# ARES_API_KEY comes from a variable group with the value marked secret
+# (Pipelines > Library > Variable group).
+
+parameters:
+  - name: profile
+    type: string
+    default: ''
+  - name: targetId
+    type: string
+    default: ''
+  - name: aresUrl
+    type: string
+    default: 'https://app.assailai.com'
+  - name: previewUrl
+    type: string
+    default: ''
+  - name: failOn
+    type: string
+    default: ''
+  - name: timeoutMinutes
+    type: string
+    default: ''
+  - name: displayName
+    type: string
+    default: 'Ares security assessment'
+
+steps:
+  - script: |
+      docker run --rm \
+        -e ARES_URL -e ARES_API_KEY -e ARES_PROFILE_ID -e ARES_TARGET_ID \
+        -e ARES_PREVIEW_URL -e ARES_FAIL_ON -e ARES_TIMEOUT_MINUTES \
+        ghcr.io/assailai/ares-scan:1
+    displayName: ${{ parameters.displayName }}
+    env:
+      ARES_URL: ${{ parameters.aresUrl }}
+      ARES_PROFILE_ID: ${{ parameters.profile }}
+      ARES_TARGET_ID: ${{ parameters.targetId }}
+      ARES_PREVIEW_URL: ${{ parameters.previewUrl }}
+      ARES_FAIL_ON: ${{ parameters.failOn }}
+      ARES_TIMEOUT_MINUTES: ${{ parameters.timeoutMinutes }}
+      # Azure does NOT expose a secret variable to the script environment on its own. Without
+      # this mapping the value arrives empty and every call 401s.
+      ARES_API_KEY: $(ARES_API_KEY)

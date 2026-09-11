@@ -1,0 +1,81 @@
+name: Ares security assessment
+description: Assess a deployed environment with Ares and fail the build on what it finds
+author: Assail
+branding:
+  icon: shield
+  color: red
+
+inputs:
+  api-key:
+    description: An Ares API key, stored as a repository secret. Settings > CI/CD in Ares mints one.
+    required: true
+  ares-url:
+    description: Your Ares instance, e.g. https://app.assailai.com
+    required: true
+  profile:
+    description: >-
+      The pipeline profile to run. Everything else (modules, credentials, agent, recipients, the
+      quality gate) is configured on the profile in Ares, so this file stays short and stops
+      changing. Name either this or target-id.
+    required: false
+  target-id:
+    description: >-
+      Assess this target with the defaults instead of a profile. Useful for a first run, before
+      anybody has configured anything.
+    required: false
+  preview-url:
+    description: >-
+      Assess THIS address on this run instead of the target's stored URL: the environment this
+      build just deployed. Its host must be covered by a domain your organization has verified and
+      affirmed it is authorized to assess, otherwise the run is refused.
+    required: false
+  fail-on:
+    description: >-
+      Quality gate rules, comma separated, ORed. For example "critical>0,high>0" or "total>1".
+      Overrides the profile's own gate. Omit it to use whatever the profile says.
+    required: false
+  hunt-type:
+    description: Override the assessment type (api, web, service).
+    required: false
+  intensity:
+    description: Override the depth (balanced, thorough).
+    required: false
+  timeout-minutes:
+    description: >-
+      How long to wait for the assessment before giving up and reporting that it is still running.
+      Defaults to the profile's own budget. Running out of time is NOT a gate failure.
+    required: false
+  poll-seconds:
+    description: How often to check for the result. Default 30.
+    required: false
+    default: "30"
+  no-wait:
+    description: Start the assessment and finish immediately, without waiting for a verdict.
+    required: false
+    default: "false"
+
+outputs:
+  run-id:
+    description: The Ares run id, for a later step or a comment.
+  verdict:
+    description: passed | failed | not_configured | inconclusive
+  dashboard-url:
+    description: Where to open the full assessment.
+  total:
+    description: Findings the gate counted.
+  critical-count:
+    description: Critical findings the gate counted.
+  high-count:
+    description: High findings the gate counted.
+  medium-count:
+    description: Medium findings the gate counted.
+  low-count:
+    description: Low findings the gate counted.
+  info-count:
+    description: Informational findings the gate counted.
+
+runs:
+  using: node20
+  # the bundle, not the tsc output: a published action runs what is committed, with no install
+  # step, so everything it needs has to be in this one file.
+  main: dist/index.cjs
