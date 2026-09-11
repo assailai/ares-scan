@@ -66,6 +66,6 @@ jobs:
           [ "${{ steps.scan.outputs.verdict }}" = "failed" ]
           [ "${{ steps.scan.outputs.critical-count }}" = "2" ]
 
-      - name: The job summary must have been written
-        run: |
-          test -s "$GITHUB_STEP_SUMMARY" && echo "job summary written"
+      # No assertion on the job summary here: GITHUB_STEP_SUMMARY is a DIFFERENT file per step,
+      # so a later step gets an empty one and can never see what the action wrote. It is rendered
+      # on the run page, and the writer is covered by a unit test.
