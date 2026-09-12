@@ -75,7 +75,12 @@ outputs:
     description: Informational findings the gate counted.
 
 runs:
-  using: node20
+  # node24, not node20. GitHub began forcing node20 actions onto node24 in September 2025 and
+  # warns on every run that does it ("The following actions target Node.js 20 but are being forced
+  # to run on Node.js 24"), so declaring node20 buys nothing and ends in a hard failure whenever
+  # the shim is removed. The bundle is built with esbuild's node20 target, which runs unchanged on
+  # node24; what changes here is only which runtime GitHub is told to use.
+  using: node24
   # the bundle, not the tsc output: a published action runs what is committed, with no install
   # step, so everything it needs has to be in this one file.
   main: dist/index.cjs
