@@ -9,6 +9,14 @@
 #         profile: '9f3c8a12-....'
 #         previewUrl: '$(previewUrl)'    # optional
 #
+# A mobile build instead: upload the file an earlier step built, then assess exactly that build.
+#
+#     - template: ares-scan.yml@ares
+#       parameters:
+#         targetId: '0b6f1c2e-....'
+#         build: 'app/build/outputs/apk/release/app-release.apk'
+#         timeoutMinutes: '120'          # a mobile assessment takes longer than a web one
+#
 # ARES_API_KEY comes from a variable group with the value marked secret
 # (Pipelines > Library > Variable group).
 
@@ -21,7 +29,7 @@ parameters:
     default: ''
   - name: aresUrl
     type: string
-    default: 'https://app.assailai.com'
+    default: 'https://ares.assailai.com'
   - name: previewUrl
     type: string
     default: ''
@@ -31,15 +39,42 @@ parameters:
   - name: timeoutMinutes
     type: string
     default: ''
+  - name: build
+    type: string
+    default: ''
+  - name: buildName
+    type: string
+    default: ''
+  - name: buildVersion
+    type: string
+    default: ''
+  - name: analysis
+    type: string
+    default: ''
+  - name: uploadOnly
+    type: string
+    default: 'false'
   - name: displayName
     type: string
     default: 'Ares security assessment'
 
 steps:
   - script: |
-      docker run --rm \
+      set -eu
+      # The container sees none of the agent's disk unless it is mounted, so a build is mounted
+      # read-only at the same absolute path, and the container starts in this step's directory:
+      # a relative build path then names the same file inside as outside. The image runs as the
+      # unprivileged node user, which can read the agent's files because they are world-readable.
+      # A build whose directory does not exist is left unmounted, so the CLI itself reports the
+      # missing file with its own exit code.
+      set --
+      if [ -n "${ARES_BUILD:-}" ] && build_dir=$(cd "$(dirname "$ARES_BUILD")" 2>/dev/null && pwd); then
+        set -- -v "$build_dir:$build_dir:ro" -w "$PWD"
+      fi
+      docker run --rm "$@" \
         -e ARES_URL -e ARES_API_KEY -e ARES_PROFILE_ID -e ARES_TARGET_ID \
         -e ARES_PREVIEW_URL -e ARES_FAIL_ON -e ARES_TIMEOUT_MINUTES \
+        -e ARES_BUILD -e ARES_BUILD_NAME -e ARES_BUILD_VERSION -e ARES_ANALYSIS -e ARES_UPLOAD_ONLY \
         ghcr.io/assailai/ares-scan:1
     displayName: ${{ parameters.displayName }}
     env:
@@ -49,6 +84,11 @@ steps:
       ARES_PREVIEW_URL: ${{ parameters.previewUrl }}
       ARES_FAIL_ON: ${{ parameters.failOn }}
       ARES_TIMEOUT_MINUTES: ${{ parameters.timeoutMinutes }}
+      ARES_BUILD: ${{ parameters.build }}
+      ARES_BUILD_NAME: ${{ parameters.buildName }}
+      ARES_BUILD_VERSION: ${{ parameters.buildVersion }}
+      ARES_ANALYSIS: ${{ parameters.analysis }}
+      ARES_UPLOAD_ONLY: ${{ parameters.uploadOnly }}
       # Azure does NOT expose a secret variable to the script environment on its own. Without
       # this mapping the value arrives empty and every call 401s.
       ARES_API_KEY: $(ARES_API_KEY)

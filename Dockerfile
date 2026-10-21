@@ -1,7 +1,7 @@
 # The portable form of the scanner: any CI system, or a laptop.
 #
 #   docker run --rm -e ARES_API_KEY ghcr.io/assailai/ares-scan:1 \
-#     --ares-url https://app.assailai.com --profile <id> --fail-on 'critical>0,high>0'
+#     --ares-url https://ares.assailai.com --profile <id> --fail-on 'critical>0,high>0'
 #
 # Two stages so the shipped image carries no TypeScript and no dev dependencies. The package has
 # ZERO runtime dependencies, so the final layer is the base image plus a few kilobytes of

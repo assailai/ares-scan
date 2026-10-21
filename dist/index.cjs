@@ -3,29 +3,57 @@
 
 // src/api.ts
 var AresApiError = class extends Error {
-  constructor(status, detail) {
-    super(detail);
-    this.status = status;
-    this.detail = detail;
-    this.name = "AresApiError";
-  }
   status;
-  detail;
+  constructor({ action, status, detail }) {
+    super(`Ares ${status >= 500 ? "could not" : "refused to"} ${action} (${status}): ${detail}`);
+    this.name = "AresApiError";
+    this.status = status;
+  }
 };
 var AresClient = class {
+  baseUrl;
+  apiKey;
   constructor(baseUrl, apiKey) {
     this.baseUrl = baseUrl;
     this.apiKey = apiKey;
   }
-  baseUrl;
-  apiKey;
+  async requestUploadUrl({
+    fileName,
+    artifactKind
+  }) {
+    return this.request({
+      action: "sign the build upload",
+      method: "POST",
+      path: "/api/v1/artifacts/upload-url",
+      body: {
+        file_name: fileName,
+        artifact_kind: artifactKind,
+        // Signed into the policy and handed back among `fields`, so the store records exactly this.
+        // A build is opaque bytes to the store whatever its kind; nothing downstream reads it.
+        content_type: "application/octet-stream"
+      }
+    });
+  }
+  async commitArtifact(body) {
+    return this.request({ action: "record the build", method: "POST", path: "/api/v1/artifacts", body });
+  }
   async startRun(body) {
-    return this.request("POST", "/api/v1/ci/runs", body);
+    return this.request({ action: "start the assessment", method: "POST", path: "/api/v1/ci/runs", body });
   }
   async getRun(id) {
-    return this.request("GET", `/api/v1/ci/runs/${encodeURIComponent(id)}`);
+    return this.request({
+      action: "report the assessment's progress",
+      method: "GET",
+      path: `/api/v1/ci/runs/${encodeURIComponent(id)}`
+    });
   }
-  async request(method, path, body) {
+  /** One call. `action` is what it asks of Ares, in the words an error names it: "record the build". */
+  async request({
+    action,
+    method,
+    path,
+    body
+  }) {
     const res = await fetch(`${this.baseUrl.replace(/\/+$/, "")}${path}`, {
       method,
       headers: {
@@ -36,7 +64,8 @@ var AresClient = class {
     });
     const text = await res.text();
     if (!res.ok) {
-      throw new AresApiError(res.status, detailOf(text) ?? `${res.status} ${res.statusText}`);
+      const detail = detailOf(text) ?? (res.statusText || "no reason given");
+      throw new AresApiError({ action, status: res.status, detail });
     }
     return JSON.parse(text);
   }
@@ -52,6 +81,105 @@ function detailOf(body) {
   } catch {
     return body.slice(0, 500) || null;
   }
+}
+
+// src/upload.ts
+var import_node_crypto = require("node:crypto");
+var import_node_fs = require("node:fs");
+var import_node_path = require("node:path");
+var KIND_BY_EXTENSION = [
+  [".apk", "android_apk"],
+  [".aab", "android_aab"],
+  [".ipa", "ios_ipa"]
+];
+function buildKindOf(path) {
+  const name = (0, import_node_path.basename)(path).toLowerCase();
+  const match = KIND_BY_EXTENSION.find(([extension]) => name.endsWith(extension));
+  if (!match) {
+    throw new Error(
+      `"${(0, import_node_path.basename)(path)}" is not a build Ares can assess. Point --build at an Android .apk or .aab, or an iOS .ipa.`
+    );
+  }
+  return match[1];
+}
+async function uploadBuild({ client, build }) {
+  const fileName = (0, import_node_path.basename)(build.path);
+  const sha256 = await sha256Of(build.path);
+  const upload = await client.requestUploadUrl({ fileName, artifactKind: build.kind });
+  await postToStorage({ upload, path: build.path, fileName });
+  return client.commitArtifact({
+    artifact_kind: build.kind,
+    name: build.name ?? fileName,
+    file_name: fileName,
+    s3_bucket: upload.s3_bucket,
+    s3_key: upload.s3_key,
+    target_id: build.targetId,
+    sha256,
+    ...build.version ? { version: build.version } : {},
+    // Current, because the pipeline that uploaded a build is asking for THAT build to be the one
+    // assessed from now on. The run below still names the build by id rather than trusting this,
+    // so a second pipeline uploading in the same minute cannot swap what this one is judged on.
+    make_current: true
+  });
+}
+async function sha256Of(path) {
+  const hash = (0, import_node_crypto.createHash)("sha256");
+  try {
+    for await (const chunk of (0, import_node_fs.createReadStream)(path)) hash.update(chunk);
+  } catch (error) {
+    throw unreadable(path, error);
+  }
+  return hash.digest("hex");
+}
+async function postToStorage({
+  upload,
+  path,
+  fileName
+}) {
+  const form = new FormData();
+  for (const [name, value] of Object.entries(upload.fields)) form.append(name, value);
+  let file;
+  try {
+    file = await (0, import_node_fs.openAsBlob)(path);
+  } catch (error) {
+    throw unreadable(path, error);
+  }
+  form.append("file", file, fileName);
+  const res = await fetch(upload.url, { method: upload.method, body: form });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(
+      `object storage refused the build upload (${res.status}): ${storageErrorOf(text) ?? res.statusText}`
+    );
+  }
+}
+function storageErrorOf(body) {
+  const code = xmlText(body, "Code");
+  const message = xmlText(body, "Message");
+  if (code && message) return `${code}: ${message}`;
+  if (code || message) return code ?? message;
+  return body.trim().slice(0, 500) || null;
+}
+function xmlText(body, element) {
+  const match = new RegExp(`<${element}>([^<]*)</${element}>`).exec(body);
+  if (!match) return null;
+  return match[1].replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+}
+function unreadable(path, error) {
+  const code = error?.code;
+  if (code === "ENOENT") {
+    return new Error(`there is no build at ${path}. Check the path the build step wrote it to.`);
+  }
+  if (code === "EISDIR") {
+    return new Error(`${path} is a directory. Point --build at the .apk, .aab or .ipa file itself.`);
+  }
+  if (code === "EACCES" || code === "EPERM") {
+    return new Error(
+      `cannot read the build at ${path}: permission denied. The ares-scan container runs as the "node" user, so the file must be readable by it (world-readable is enough).`
+    );
+  }
+  const reason = error instanceof Error ? error.message : String(error);
+  return new Error(`cannot read the build at ${path}: ${reason}`);
 }
 
 // src/options.ts
@@ -80,6 +208,81 @@ function parseFailOn(raw) {
     });
   }
   return rules;
+}
+var ANALYSIS_TYPES = ["sast", "dast"];
+function parseAnalysis(raw) {
+  const picked = [];
+  for (const piece of raw.split(",")) {
+    const token = piece.trim().toLowerCase();
+    if (!token) continue;
+    const type = ANALYSIS_TYPES.find((t) => t === token);
+    if (!type) {
+      throw new Error(
+        `"${token}" is not an analysis Ares runs on a build. Use ${ANALYSIS_TYPES.join(", ")}, or both separated by a comma.`
+      );
+    }
+    if (!picked.includes(type)) picked.push(type);
+  }
+  if (picked.length === 0) {
+    throw new Error(`--analysis names nothing to run. Use ${ANALYSIS_TYPES.join(", ")}, or both.`);
+  }
+  return picked;
+}
+function readSwitch(name, raw) {
+  if (raw === void 0) return false;
+  const value = raw.toLowerCase();
+  if (value === "true" || value === "1") return true;
+  if (value === "false" || value === "0") return false;
+  throw new Error(`--${name} is on or off: write true or false, not "${raw}"`);
+}
+function readBuild({
+  path,
+  pick,
+  targetId,
+  previewUrl,
+  huntType
+}) {
+  if (!targetId) {
+    throw new Error("--build needs --target-id: name the mobile target this build belongs to");
+  }
+  if (previewUrl) {
+    throw new Error(
+      "--preview-url assesses a deployed address, and a mobile build has none. Drop it, or assess the build and the deployed environment in two separate steps."
+    );
+  }
+  if (huntType && huntType !== "mobile") {
+    throw new Error(
+      `--build uploads a mobile build, which is assessed as --hunt-type mobile, not ${huntType}`
+    );
+  }
+  return {
+    path,
+    kind: buildKindOf(path),
+    targetId,
+    name: pick("build-name", "ARES_BUILD_NAME"),
+    version: pick("build-version", "ARES_BUILD_VERSION")
+  };
+}
+function refuseRunWithoutBuild({
+  pick,
+  profileId,
+  targetId,
+  uploadOnly
+}) {
+  if (!profileId && !targetId) {
+    throw new Error("name what to assess: --profile <id>, or --target-id <id>");
+  }
+  if (profileId && targetId) {
+    throw new Error("name either --profile or --target-id, not both");
+  }
+  if (uploadOnly) {
+    throw new Error("--upload-only uploads a build; name the file with --build");
+  }
+  if (pick("build-name", "ARES_BUILD_NAME") || pick("build-version", "ARES_BUILD_VERSION")) {
+    throw new Error(
+      "--build-name and --build-version describe an uploaded build; name the file with --build"
+    );
+  }
 }
 function parseArgv(argv) {
   const out = {};
@@ -115,11 +318,25 @@ function readOptions(argv, env) {
   if (!apiKey) throw new Error("set --api-key (or the ARES_API_KEY secret)");
   const profileId = pick("profile", "ARES_PROFILE_ID");
   const targetId = pick("target-id", "ARES_TARGET_ID");
-  if (!profileId && !targetId) {
-    throw new Error("name what to assess: --profile <id>, or --target-id <id>");
+  const previewUrl = pick("preview-url", "ARES_PREVIEW_URL");
+  const failOn = pick("fail-on", "ARES_FAIL_ON");
+  const buildPath = pick("build", "ARES_BUILD");
+  const uploadOnly = readSwitch("upload-only", pick("upload-only", "ARES_UPLOAD_ONLY"));
+  const rawAnalysis = pick("analysis", "ARES_ANALYSIS");
+  const analysisTypes = rawAnalysis === void 0 ? void 0 : parseAnalysis(rawAnalysis);
+  const requestedHuntType = pick("hunt-type", "ARES_HUNT_TYPE");
+  const build = buildPath ? readBuild({ path: buildPath, pick, targetId, previewUrl, huntType: requestedHuntType }) : void 0;
+  if (!build) refuseRunWithoutBuild({ pick, profileId, targetId, uploadOnly });
+  const huntType = build ? "mobile" : requestedHuntType;
+  if (analysisTypes && huntType && huntType !== "mobile") {
+    throw new Error(
+      `--analysis chooses what a mobile assessment runs, and this is --hunt-type ${huntType}`
+    );
   }
-  if (profileId && targetId) {
-    throw new Error("name either --profile or --target-id, not both");
+  if (uploadOnly && (analysisTypes || failOn)) {
+    throw new Error(
+      `--upload-only starts no assessment, so ${analysisTypes ? "--analysis" : "--fail-on"} would never apply. Drop one or the other.`
+    );
   }
   const timeout = pick("timeout-minutes", "ARES_TIMEOUT_MINUTES");
   const poll2 = pick("poll-seconds", "ARES_POLL_SECONDS");
@@ -128,10 +345,10 @@ function readOptions(argv, env) {
     apiKey,
     profileId,
     targetId,
-    previewUrl: pick("preview-url", "ARES_PREVIEW_URL"),
-    huntType: pick("hunt-type", "ARES_HUNT_TYPE"),
+    previewUrl,
+    huntType,
     intensity: pick("intensity", "ARES_INTENSITY"),
-    failOn: pick("fail-on", "ARES_FAIL_ON"),
+    failOn,
     timeoutMinutes: timeout ? Number(timeout) : void 0,
     pollSeconds: poll2 ? Number(poll2) : 30,
     noWait: (pick("no-wait", "ARES_NO_WAIT") ?? "false") === "true",
@@ -140,7 +357,10 @@ function readOptions(argv, env) {
     commitSha: pick("commit-sha", "GITHUB_SHA") ?? envVar("CI_COMMIT_SHA", env) ?? envVar("BUILD_SOURCEVERSION", env),
     ref: pick("ref", "GITHUB_REF") ?? envVar("CI_COMMIT_REF_NAME", env) ?? envVar("BUILD_SOURCEBRANCH", env),
     repository: pick("repository", "GITHUB_REPOSITORY") ?? envVar("CI_PROJECT_PATH", env) ?? envVar("BUILD_REPOSITORY_NAME", env),
-    pipelineUrl: pick("pipeline-url", "ARES_PIPELINE_URL") ?? githubRunUrl(env) ?? envVar("CI_PIPELINE_URL", env)
+    pipelineUrl: pick("pipeline-url", "ARES_PIPELINE_URL") ?? githubRunUrl(env) ?? envVar("CI_PIPELINE_URL", env),
+    build,
+    analysisTypes,
+    uploadOnly
   };
 }
 function githubRunUrl(env) {
@@ -151,13 +371,15 @@ function githubRunUrl(env) {
 }
 
 // src/report.ts
-var import_node_fs = require("node:fs");
+var import_node_fs2 = require("node:fs");
 var TIERS = ["critical", "high", "medium", "low", "info"];
 function renderSummary(status) {
   const lines = [];
   lines.push("");
   lines.push(`Ares assessment of ${status.target_name ?? "your application"}`);
-  lines.push(`  URL       ${status.target_url}${status.url_overridden ? "  (this run only)" : ""}`);
+  if (status.target_url) {
+    lines.push(`  URL       ${status.target_url}${status.url_overridden ? "  (this run only)" : ""}`);
+  }
   lines.push(`  Status    ${status.status}`);
   if (status.failure_reason) lines.push(`  Reason    ${status.failure_reason}`);
   lines.push(`  Findings  ${severityLine(status.gate.counts)}`);
@@ -169,6 +391,17 @@ function renderSummary(status) {
   lines.push(`  Gate      ${status.gate.summary}`);
   lines.push(`  Details   ${status.dashboard_url}`);
   lines.push("");
+  return lines.join("\n");
+}
+function renderBuild(artifact) {
+  const lines = [
+    `Uploaded ${artifact.name}`,
+    `  Build     ${artifact.id}`,
+    `  Package   ${artifact.package_id ?? "not read from the build"}`,
+    `  Version   ${artifact.version ?? "not recorded"}`,
+    `  Affirmed  ${artifact.attack_affirmed ? "yes, authorized for assessment" : "NO, not authorized for assessment"}`,
+    ""
+  ];
   return lines.join("\n");
 }
 function severityLine(counts) {
@@ -185,8 +418,7 @@ function writeGitHubSummary(status, env) {
     "",
     status.gate.summary,
     "",
-    `**Assessed:** ${status.target_url}${status.url_overridden ? " _(this run only)_" : ""}`,
-    "",
+    ...status.target_url ? [`**Assessed:** ${status.target_url}${status.url_overridden ? " _(this run only)_" : ""}`, ""] : [],
     "| Severity | Count |",
     "| --- | --- |",
     rows,
@@ -195,20 +427,25 @@ function writeGitHubSummary(status, env) {
     `[Open the full assessment](${status.dashboard_url})`,
     ""
   ].join("\n");
-  (0, import_node_fs.appendFileSync)(path, body);
+  (0, import_node_fs2.appendFileSync)(path, body);
 }
 function writeGitHubOutputs(status, env) {
+  writeGitHubOutput(
+    {
+      "run-id": status.id,
+      verdict: status.gate.verdict,
+      "dashboard-url": status.dashboard_url,
+      total: String(status.gate.total),
+      ...Object.fromEntries(TIERS.map((t) => [`${t}-count`, String(status.gate.counts[t])]))
+    },
+    env
+  );
+}
+function writeGitHubOutput(outputs, env) {
   const path = env.GITHUB_OUTPUT;
   if (!path) return;
-  const outputs = {
-    "run-id": status.id,
-    verdict: status.gate.verdict,
-    "dashboard-url": status.dashboard_url,
-    total: String(status.gate.total),
-    ...Object.fromEntries(TIERS.map((t) => [`${t}-count`, String(status.gate.counts[t])]))
-  };
   const body = Object.entries(outputs).map(([k, v]) => `${k}=${v}`).join("\n");
-  (0, import_node_fs.appendFileSync)(path, `${body}
+  (0, import_node_fs2.appendFileSync)(path, `${body}
 `);
 }
 function annotate(level, message, env) {
@@ -230,10 +467,28 @@ async function main() {
   const env = process.env;
   const options = readOptions(process.argv.slice(2), env);
   const client = new AresClient(options.baseUrl, options.apiKey);
-  const started = await client.startRun(launchBody(options));
+  let artifact;
+  if (options.build) {
+    process.stdout.write(`Uploading ${options.build.path}
+`);
+    artifact = await uploadBuild({ client, build: options.build });
+    process.stdout.write(renderBuild(artifact));
+    writeGitHubOutput({ "artifact-id": artifact.id }, env);
+    const stop = exitAfterUpload({ artifact, uploadOnly: options.uploadOnly, env });
+    if (stop !== void 0) return stop;
+  }
+  const started = await client.startRun(launchBody(options, artifact));
+  if (artifact && started.artifact_id !== artifact.id) {
+    annotate(
+      "error",
+      `Ares started ${started.dashboard_url} but did not confirm it assesses the build this pipeline uploaded (asked for ${artifact.id}, got ${started.artifact_id ?? "none"}). Not judging this build on it.`,
+      env
+    );
+    return EXIT_ERROR;
+  }
   process.stdout.write(
     `Started an Ares assessment of ${started.target_name ?? started.target_id}
-  assessing ${started.target_url}${started.url_overridden ? "  (this run only)" : ""}
+  assessing ${subjectOf(started, artifact)}
   ${started.dashboard_url}
 `
   );
@@ -266,7 +521,27 @@ async function main() {
       return EXIT_ERROR;
   }
 }
-function launchBody(options) {
+var BUILD_NOT_AFFIRMED = 'The build was uploaded, but it is not authorized for assessment: this API key was minted without build attestation. Mint a key with "I own the mobile apps this key will upload" ticked in Settings > CI/CD, or affirm the build in Ares.';
+var BUILD_NOT_CURRENT = "Ares recorded the build but did not make it the target's current build, so this Ares is probably older than ares-scan 1.1.0. Nothing was assessed.";
+function exitAfterUpload({
+  artifact,
+  uploadOnly,
+  env
+}) {
+  if (!artifact.in_use) {
+    annotate("error", BUILD_NOT_CURRENT, env);
+    return EXIT_ERROR;
+  }
+  if (!artifact.attack_affirmed && !uploadOnly) {
+    annotate("error", `${BUILD_NOT_AFFIRMED} No assessment was started.`, env);
+    return EXIT_ERROR;
+  }
+  if (!artifact.attack_affirmed) annotate("warning", BUILD_NOT_AFFIRMED, env);
+  if (!uploadOnly) return void 0;
+  process.stdout.write("Uploaded only; no assessment was started (--upload-only).\n");
+  return EXIT_OK;
+}
+function launchBody(options, artifact) {
   const body = {
     ci: {
       commit_sha: options.commitSha ?? null,
@@ -276,12 +551,18 @@ function launchBody(options) {
     }
   };
   if (options.profileId) body.profile_id = options.profileId;
-  if (options.targetId) body.target_id = options.targetId;
+  else if (options.targetId) body.target_id = options.targetId;
   if (options.previewUrl) body.target_url_override = options.previewUrl;
   if (options.huntType) body.hunt_type = options.huntType;
   if (options.intensity) body.intensity = options.intensity;
   if (options.failOn) body.gate = { rules: parseFailOn(options.failOn) };
+  if (artifact) body.artifact_id = artifact.id;
+  if (options.analysisTypes) body.analysis_types = options.analysisTypes;
   return body;
+}
+function subjectOf(started, artifact) {
+  if (artifact) return `the build uploaded above, ${artifact.name} (${artifact.id})`;
+  return `${started.target_url}${started.url_overridden ? "  (this run only)" : ""}`;
 }
 async function poll(client, id, pollSeconds, budgetMinutes) {
   const deadline = Date.now() + budgetMinutes * 6e4;
@@ -314,10 +595,6 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 main().then((code) => process.exit(code)).catch((error) => {
-  if (error instanceof AresApiError) {
-    annotate("error", `Ares refused the request (${error.status}): ${error.detail}`, process.env);
-  } else {
-    annotate("error", error instanceof Error ? error.message : String(error), process.env);
-  }
+  annotate("error", error instanceof Error ? error.message : String(error), process.env);
   process.exit(EXIT_ERROR);
 });

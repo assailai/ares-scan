@@ -1,5 +1,5 @@
 name: Ares security assessment
-description: Assess a deployed environment with Ares and fail the build on what it finds
+description: Assess a deployed environment or a mobile build with Ares and fail the build on what it finds
 author: Assail
 branding:
   icon: shield
@@ -10,7 +10,7 @@ inputs:
     description: An Ares API key, stored as a repository secret. Settings > CI/CD in Ares mints one.
     required: true
   ares-url:
-    description: Your Ares instance, e.g. https://app.assailai.com
+    description: Your Ares instance, e.g. https://ares.assailai.com
     required: true
   profile:
     description: >-
@@ -21,7 +21,8 @@ inputs:
   target-id:
     description: >-
       Assess this target with the defaults instead of a profile. Useful for a first run, before
-      anybody has configured anything.
+      anybody has configured anything. Required with build, which is filed under this target; a
+      profile may then be named as well, and configures the run.
     required: false
   preview-url:
     description: >-
@@ -35,7 +36,9 @@ inputs:
       Overrides the profile's own gate. Omit it to use whatever the profile says.
     required: false
   hunt-type:
-    description: Override the assessment type (api, web, service).
+    description: >-
+      Override the assessment type (api, web, service, mobile). With build it is mobile, and any
+      other value is refused.
     required: false
   intensity:
     description: Override the depth (balanced, thorough).
@@ -53,8 +56,38 @@ inputs:
     description: Start the assessment and finish immediately, without waiting for a verdict.
     required: false
     default: "false"
+  build:
+    description: >-
+      A mobile build to upload and assess: the path to an Android .apk or .aab, or an iOS .ipa,
+      relative to the workspace. It must be readable by the user the action runs as, which on a
+      hosted runner is the user that built it. The build is uploaded, made the target's current
+      build, and the assessment that follows assesses exactly this upload. Needs target-id, and
+      cannot be combined with preview-url. A mobile assessment takes longer than a web one, so set
+      timeout-minutes (120 is a good start) and keep the job's own timeout above it.
+    required: false
+  build-name:
+    description: What Ares calls the uploaded build. Defaults to the file name.
+    required: false
+  build-version:
+    description: >-
+      The version to record against the uploaded build, e.g. the pipeline's release number.
+      Where Ares can read a version out of the build itself, that one is recorded instead.
+    required: false
+  analysis:
+    description: >-
+      Which halves of a mobile assessment to run: sast, dast, or "sast,dast". Omit it to keep
+      Ares's own default for the run.
+    required: false
+  upload-only:
+    description: >-
+      Upload the build, make it the target's current build, and finish without starting an
+      assessment. The build's id is the artifact-id output.
+    required: false
+    default: "false"
 
 outputs:
+  artifact-id:
+    description: The id of the build this step uploaded, when build was given.
   run-id:
     description: The Ares run id, for a later step or a comment.
   verdict:
