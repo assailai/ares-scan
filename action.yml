@@ -1,0 +1,119 @@
+name: Ares security assessment
+description: Assess a deployed environment or a mobile build with Ares and fail the build on what it finds
+author: Assail
+branding:
+  icon: shield
+  color: red
+
+inputs:
+  api-key:
+    description: An Ares API key, stored as a repository secret. Settings > CI/CD in Ares mints one.
+    required: true
+  ares-url:
+    description: Your Ares instance, e.g. https://ares.assailai.com
+    required: true
+  profile:
+    description: >-
+      The pipeline profile to run. Everything else (modules, credentials, agent, recipients, the
+      quality gate) is configured on the profile in Ares, so this file stays short and stops
+      changing. Name either this or target-id.
+    required: false
+  target-id:
+    description: >-
+      Assess this target with the defaults instead of a profile. Useful for a first run, before
+      anybody has configured anything. Required with build, which is filed under this target; a
+      profile may then be named as well, and configures the run.
+    required: false
+  preview-url:
+    description: >-
+      Assess THIS address on this run instead of the target's stored URL: the environment this
+      build just deployed. Its host must be covered by a domain your organization has verified and
+      affirmed it is authorized to assess, otherwise the run is refused.
+    required: false
+  fail-on:
+    description: >-
+      Quality gate rules, comma separated, ORed. For example "critical>0,high>0" or "total>1".
+      Overrides the profile's own gate. Omit it to use whatever the profile says.
+    required: false
+  hunt-type:
+    description: >-
+      Override the assessment type (api, web, service, mobile). With build it is mobile, and any
+      other value is refused.
+    required: false
+  intensity:
+    description: Override the depth (balanced, thorough).
+    required: false
+  timeout-minutes:
+    description: >-
+      How long to wait for the assessment before giving up and reporting that it is still running.
+      Defaults to the profile's own budget. Running out of time is NOT a gate failure.
+    required: false
+  poll-seconds:
+    description: How often to check for the result. Default 30.
+    required: false
+    default: "30"
+  no-wait:
+    description: Start the assessment and finish immediately, without waiting for a verdict.
+    required: false
+    default: "false"
+  build:
+    description: >-
+      A mobile build to upload and assess: the path to an Android .apk or .aab, or an iOS .ipa,
+      relative to the workspace. It must be readable by the user the action runs as, which on a
+      hosted runner is the user that built it. The build is uploaded, made the target's current
+      build, and the assessment that follows assesses exactly this upload. Needs target-id, and
+      cannot be combined with preview-url. A mobile assessment takes longer than a web one, so set
+      timeout-minutes (120 is a good start) and keep the job's own timeout above it.
+    required: false
+  build-name:
+    description: What Ares calls the uploaded build. Defaults to the file name.
+    required: false
+  build-version:
+    description: >-
+      The version to record against the uploaded build, e.g. the pipeline's release number.
+      Where Ares can read a version out of the build itself, that one is recorded instead.
+    required: false
+  analysis:
+    description: >-
+      Which halves of a mobile assessment to run: sast, dast, or "sast,dast". Omit it to keep
+      Ares's own default for the run.
+    required: false
+  upload-only:
+    description: >-
+      Upload the build, make it the target's current build, and finish without starting an
+      assessment. The build's id is the artifact-id output.
+    required: false
+    default: "false"
+
+outputs:
+  artifact-id:
+    description: The id of the build this step uploaded, when build was given.
+  run-id:
+    description: The Ares run id, for a later step or a comment.
+  verdict:
+    description: passed | failed | not_configured | inconclusive
+  dashboard-url:
+    description: Where to open the full assessment.
+  total:
+    description: Findings the gate counted.
+  critical-count:
+    description: Critical findings the gate counted.
+  high-count:
+    description: High findings the gate counted.
+  medium-count:
+    description: Medium findings the gate counted.
+  low-count:
+    description: Low findings the gate counted.
+  info-count:
+    description: Informational findings the gate counted.
+
+runs:
+  # node24, not node20. GitHub began forcing node20 actions onto node24 in September 2025 and
+  # warns on every run that does it ("The following actions target Node.js 20 but are being forced
+  # to run on Node.js 24"), so declaring node20 buys nothing and ends in a hard failure whenever
+  # the shim is removed. The bundle is built with esbuild's node20 target, which runs unchanged on
+  # node24; what changes here is only which runtime GitHub is told to use.
+  using: node24
+  # the bundle, not the tsc output: a published action runs what is committed, with no install
+  # step, so everything it needs has to be in this one file.
+  main: dist/index.cjs
